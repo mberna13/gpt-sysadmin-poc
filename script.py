@@ -17,17 +17,21 @@ except ImportError:
     )
 
 # ------------------------------------------------------------------------------
+# Generate a daily log filename based on YYYYMMDD
+TODAY = datetime.now().strftime('%Y%m%d')
+LOG_FILE = f"llm_admin_poc_{TODAY}.log"
+
+# ------------------------------------------------------------------------------
 # Logging setup
-LOG_FILE = "llm_admin_gpt4.log"
 def log(message):
     """
     Simple function to write log messages to both a file and standard output.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] {message}"
-    print(log_line)
+    line = f"[{timestamp}] {message}"
+    print(line)
     with open(LOG_FILE, "a") as f:
-        f.write(log_line + "\n")
+        f.write(line + "\n")
 
 # ------------------------------------------------------------------------------
 # OpenAI API setup
@@ -45,9 +49,7 @@ def summarize_auth_logs(raw_logs):
       2. 'Connection closed by authenticating user root <IP> port'
     Return a text summary describing suspicious attempts.
     """
-
     failed_password_pattern = r"Failed password for .* from ([\d\.]+)"
-    # Updated pattern to match your actual logs:
     closed_conn_pattern = r"Connection closed by authenticating user root\s+([\d\.]+)\s+port"
 
     activity = []
@@ -57,7 +59,7 @@ def summarize_auth_logs(raw_logs):
     for ip in failed_ips:
         activity.append(("Failed", ip))
 
-    # Match "Connection closed by ... user root" lines
+    # Match "Connection closed" lines for root
     closed_ips = re.findall(closed_conn_pattern, raw_logs)
     for ip in closed_ips:
         activity.append(("Closed", ip))
@@ -67,9 +69,8 @@ def summarize_auth_logs(raw_logs):
             "No failed SSH login attempts or repeated 'connection closed' lines for root found in the last logs."
         )
 
-    # Tally occurrences by IP
+    # Tally occurrences
     suspicious_dict = defaultdict(lambda: {"Failed": 0, "Closed": 0})
-
     for reason, ip in activity:
         suspicious_dict[ip][reason] += 1
 
@@ -77,46 +78,147 @@ def summarize_auth_logs(raw_logs):
     for ip, counts in suspicious_dict.items():
         f_count = counts["Failed"]
         c_count = counts["Closed"]
-        # Only mention IP if it has at least 1 event
-        line = (f"IP {ip} -> {f_count} 'Failed password' event(s), "
-                f"{c_count} 'connection closed' event(s) for root.")
+        line = (
+            f"IP {ip} -> {f_count} 'Failed password' event(s), "
+            f"{c_count} 'connection closed' event(s) for root."
+        )
         summary_lines.append(line)
 
     summary_text = "\n".join(summary_lines)
-    return (
-        "Potentially suspicious SSH events:\n" + summary_text
-    )
+    return "Potentially suspicious SSH events:\n" + summary_text
+
+# ------------------------------------------------------------------------------
+def get_log_maintenance_summary():
+    """
+    Illustrative example of 'log maintenance':
+    find log files older than 30 days under /var/log (just counting them).
+    """
+    cmd = "find /var/log -type f -mtime +30 2>/dev/null | wc -l"
+    result = subprocess.getoutput(cmd)
+    try:
+        old_logs_count = int(result)
+    except ValueError:
+        old_logs_count = 0
+
+    if old_logs_count == 0:
+        return "No log files older than 30 days were found in /var/log."
+    else:
+        return f"{old_logs_count} log files older than 30 days exist in /var/log (consider removing or archiving)."
+
+# ------------------------------------------------------------------------------
+def get_cpu_mem_info():
+    """
+    Gather CPU load and memory usage info (via 'uptime' and 'free -m').
+    """
+    uptime_out = subprocess.getoutput("uptime")
+    free_out = subprocess.getoutput("free -m")
+    return f"CPU/Load Info:\n{uptime_out}\n\nMemory Usage (MB):\n{free_out}"
+
+# ------------------------------------------------------------------------------
+def get_io_info():
+    """
+    Gather I/O stats (via 'iostat -x 1 1'), if sysstat is installed.
+    """
+    iostat_out = subprocess.getoutput("iostat -x 1 1 2>/dev/null || echo 'iostat not available.'")
+    return f"I/O Stats:\n{iostat_out}"
+
+# ------------------------------------------------------------------------------
+def get_service_health():
+    """
+    Check for failed or inactive systemd services (via 'systemctl --failed').
+    """
+    services_out = subprocess.getoutput("systemctl --failed 2>/dev/null")
+    if "0 loaded units listed" in services_out:
+        return "No failed systemd services."
+    else:
+        return f"Some systemd services are failing:\n{services_out}"
+
+# ------------------------------------------------------------------------------
+def check_rootkits():
+    """
+    Example using rkhunter in 'check' mode.
+    Typically requires: sudo apt-get install rkhunter
+    """
+    rkhunter_out = subprocess.getoutput("rkhunter --version 2>/dev/null")
+    if "Rootkit Hunter" not in rkhunter_out:
+        return "rkhunter not installed or unavailable. No rootkit check performed."
+
+    check_out = subprocess.getoutput("sudo rkhunter --check --sk --nocolors 2>/dev/null")
+    summary_lines = []
+    capture = False
+    for line in check_out.splitlines():
+        if "System checks summary" in line:
+            capture = True
+        if capture:
+            summary_lines.append(line)
+    if summary_lines:
+        return "\n".join(summary_lines)
+    else:
+        return "Ran rkhunter check but could not parse a summary. Check logs manually."
 
 # ------------------------------------------------------------------------------
 def get_system_info():
     """
     Gather system info:
     - apt updates
-    - disk usage
+    - CPU/mem
+    - I/O
+    - systemd services health
+    - log maintenance
+    - rootkit detection
     - last 10 lines syslog
     - summary of last 50 lines of auth.log
     """
-    log("Gathering system information...")
+    log("Gathering extended system information...")
 
+    # 1. Basic updates info
     apt_list = subprocess.getoutput("apt list --upgradable 2>/dev/null")
-    disk_usage = subprocess.getoutput("df -h")
+
+    # 2. CPU & Mem
+    cpu_mem_summary = get_cpu_mem_info()
+
+    # 3. I/O stats
+    io_summary = get_io_info()
+
+    # 4. Service health
+    service_summary = get_service_health()
+
+    # 5. Log maintenance
+    log_maint_summary = get_log_maintenance_summary()
+
+    # 6. Rootkit check
+    rootkit_summary = check_rootkits()
+
+    # 7. Syslog snippet
     syslog_tail = subprocess.getoutput("tail -n 10 /var/log/syslog")
 
-    # Adjust the number of lines if needed
+    # 8. Auth log snippet
     auth_logs_raw = subprocess.getoutput("tail -n 50 /var/log/auth.log")
     auth_logs_summary = summarize_auth_logs(auth_logs_raw)
 
     system_info = f"""
-    Packages needing updates (apt):
+    == PACKAGE UPDATES ==
     {apt_list}
 
-    Disk usage (df -h):
-    {disk_usage}
+    == CPU/MEM INFO ==
+    {cpu_mem_summary}
 
-    Last 10 lines of /var/log/syslog:
+    == I/O INFO ==
+    {io_summary}
+
+    == SERVICE HEALTH ==
+    {service_summary}
+
+    == LOG MAINTENANCE ==
+    {log_maint_summary}
+
+    == ROOTKIT DETECTION ==
+    {rootkit_summary}
+
+    == SYSLOG (last 10 lines) ==
     {syslog_tail}
 
-    Auth log summary (last 50 lines):
+    == AUTH LOG SUMMARY (last 50 lines) ==
     {auth_logs_summary}
     """
     return system_info.strip()
@@ -124,20 +226,30 @@ def get_system_info():
 # ------------------------------------------------------------------------------
 def build_chat_messages(system_info):
     """
-    Build chat-style messages for GPT-4o. We'll use a system message to define its role,
-    and a user message to provide the 'system state' context.
+    Build chat-style messages for GPT-4o.
+    We'll instruct the LLM to interpret the extended system info
+    and propose safe, minimal changes if needed.
+    BUT we also instruct it to output commands that we can parse and run automatically.
     """
     system_message = {
         "role": "system",
         "content": (
-            "You are a helpful AI Linux system administrator assistant.\n"
+            "You are a thorough AI Linux system administrator assistant.\n"
             "Your goal is to keep the Ubuntu system secure, stable, and up-to-date.\n"
-            "If the apt upgradeable package list is empty, do NOT recommend running apt updates.\n"
-            "Analyze disk usage to determine if any immediate action is necessary.\n"
-            "Determine if there are any abnormal issues present in the system log (/var/log/syslog).\n"
-            "You also look for possible brute-force SSH login attempts or suspicious activity, "
-            "including repeated 'connection closed' events for root from the same IP.\n"
-            "You are cautious about risky changes and will only propose safe, best-practice commands.\n"
+            "Analyze the provided system state, which includes:\n"
+            " - Package updates (if any)\n"
+            " - CPU/Memory usage\n"
+            " - Disk I/O stats\n"
+            " - System services health\n"
+            " - Log maintenance potential\n"
+            " - Rootkit detection summary\n"
+            " - Syslog snippet\n"
+            " - SSH auth log summary\n\n"
+            "IMPORTANT: When you propose a command, put it on a separate line starting with 'COMMAND:'\n"
+            "for example:\n"
+            "COMMAND: sudo apt update\n"
+            "so we can parse it automatically.\n"
+            "Only propose safe, best-practice commands."
         )
     }
 
@@ -145,15 +257,15 @@ def build_chat_messages(system_info):
         "role": "user",
         "content": (
             f"Here is the current system state:\n\n{system_info}\n\n"
-            "Please:\n"
-            "1. Propose any needed commands or actions to keep the system updated, if any.\n"
-            "2. Propose any action needed based on disk usage, if any.\n"
-            "3. Recommend any actions necessary based on system log output.\n"
-            "4. Analyze the SSH auth log summary for suspicious activity (failed logins, brute force attempts,\n"
-            "   repeated closed connections for root from the same IP, etc.).\n"
-            "5. Provide security recommendations or commands to mitigate brute-force attacks, "
-            "   but only if they appear in the logs.\n"
-            "If none of the above is needed, explicitly say no action is required."
+            "Please do the following:\n"
+            "1. If updates or packages need to be installed, output each install or update command on its own line, "
+            "prefixed with 'COMMAND:'.\n"
+            "2. If logs should be rotated or removed, propose the exact commands. "
+            "Again, each command on its own line prefixed with 'COMMAND:'.\n"
+            "3. If any service needs restarting or enabling, output that as well.\n"
+            "4. Summarize what you did or recommended at the end.\n"
+            "If nothing is needed, say 'No action required.'\n"
+            "Only propose commands if they are truly necessary."
         )
     }
     return [system_message, user_message]
@@ -175,7 +287,7 @@ def call_llm_chat(messages):
             messages=messages,
             response_format={"type": "text"},
             temperature=0.0,
-            max_completion_tokens=700,  # More tokens to allow a thorough response
+            max_completion_tokens=1000,
             top_p=1,
             frequency_penalty=0,
             presence_penalty=0
@@ -186,7 +298,6 @@ def call_llm_chat(messages):
 
         # 'response' is a ChatCompletion object, not a dict
         choices = response.choices
-
         if not choices:
             log("No choices returned from the LLM.")
             return ""
@@ -200,23 +311,124 @@ def call_llm_chat(messages):
         return ""
 
 # ------------------------------------------------------------------------------
-def parse_llm_response(text_response):
+def extract_commands(llm_response):
     """
-    For this PoC, we simply log the raw response text.
+    Parse the LLM response for lines that start with 'COMMAND:'.
+    We'll return a list of the commands minus the prefix.
     """
-    log("LLM Response:")
-    log(text_response)
-    return text_response
+    commands = []
+    for line in llm_response.splitlines():
+        line = line.strip()
+        if line.startswith("COMMAND:"):
+            # e.g. "COMMAND: sudo apt update"
+            cmd = line.replace("COMMAND:", "", 1).strip()
+            commands.append(cmd)
+    return commands
+
+# ------------------------------------------------------------------------------
+# We'll split our whitelisting approach into two parts:
+# 1) A list of exact commands (for convenience).
+# 2) A list of regex patterns for commands that have variables, like IP addresses.
+
+STATIC_SAFE_COMMANDS = [
+    "sudo apt update",
+    "sudo apt upgrade",
+    "sudo apt upgrade -y",
+    "sudo apt install fail2ban",
+    "sudo apt install rkhunter",
+    "sudo rkhunter --update",
+    "sudo rkhunter --checkall",
+    "sudo less /var/log/rkhunter.log",
+    "sudo systemctl restart",
+    "sudo systemctl enable",
+    "sudo apt-get update",
+    "sudo apt-get upgrade",
+    "logrotate",
+    # ... add more as needed
+]
+
+# Regex pattern that allows iptables DROP for any IPv4 address:
+#   e.g. "sudo iptables -A INPUT -s 123.45.67.89 -j DROP"
+REGEX_SAFE_COMMANDS = [
+    r"^sudo iptables -A INPUT -s ([0-9]{1,3}\.){3}[0-9]{1,3} -j DROP$"
+]
+
+def is_whitelisted(cmd):
+    """
+    Check if 'cmd' matches any known safe command or regex pattern.
+    """
+    cmd_stripped = cmd.strip()
+    cmd_lower = cmd_stripped.lower()
+
+    # 1. Check static commands (exact match in lowercase).
+    for safe_cmd in STATIC_SAFE_COMMANDS:
+        # We'll do an exact match ignoring case:
+        # if we wanted a substring, we could do something else
+        if cmd_lower == safe_cmd.lower():
+            return True
+
+    # 2. Check each regex in REGEX_SAFE_COMMANDS:
+    for pattern in REGEX_SAFE_COMMANDS:
+        if re.match(pattern, cmd_stripped):
+            return True
+
+    return False
+
+# ------------------------------------------------------------------------------
+def run_commands(commands):
+    executed = []
+    for cmd in commands:
+        # If the LLM forgot -y on 'apt upgrade', force it
+        lower_cmd = cmd.lower()
+        if lower_cmd.startswith("sudo apt upgrade") and "-y" not in lower_cmd:
+            log(f"Appending '-y' to upgrade command: {cmd}")
+            cmd += " -y"
+
+        # Now check if it's whitelisted (assuming you have a whitelist approach)
+        if is_whitelisted(cmd):
+            log(f"Executing whitelisted command: {cmd}")
+            try:
+                subprocess.run(cmd, shell=True, check=True)
+                log(f"Command succeeded: {cmd}")
+                executed.append(cmd)
+            except subprocess.CalledProcessError as e:
+                log(f"Command failed: {cmd} with error: {e}")
+        else:
+            log(f"NOT WHITELISTED, skipping: {cmd}")
+    return executed
 
 # ------------------------------------------------------------------------------
 def main():
-    log("Starting GPT-4o admin PoC...")
+    log("Starting GPT-4o admin PoC with extended checks AND auto-execution...")
 
+    # 1. Gather system info
     system_info = get_system_info()
+
+    # 2. Build the chat prompt (with instructions for the LLM to produce "COMMAND:")
     messages = build_chat_messages(system_info)
+
+    # 3. Call the LLM
     llm_response = call_llm_chat(messages)
 
-    parse_llm_response(llm_response)
+    # 4. Log the LLM's entire output
+    log("LLM Response:")
+    log(llm_response)
+
+    # 5. Extract any commands from lines starting with "COMMAND:"
+    proposed_commands = extract_commands(llm_response)
+    if not proposed_commands:
+        log("No commands proposed by the LLM.")
+    else:
+        log(f"Proposed commands from LLM: {proposed_commands}")
+
+    # 6. Execute whitelisted commands automatically
+    executed_cmds = run_commands(proposed_commands)
+
+    # 7. Summarize the results
+    if executed_cmds:
+        log(f"Executed {len(executed_cmds)} commands from LLM suggestions.")
+    else:
+        log("No commands executed.")
 
     log("GPT-4o admin PoC run completed.\n")
 
