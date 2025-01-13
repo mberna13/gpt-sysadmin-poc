@@ -2,7 +2,6 @@
 
 import os
 import re
-import json
 import subprocess
 from datetime import datetime
 from collections import Counter, defaultdict
@@ -43,40 +42,6 @@ MODEL_NAME = "gpt-4o"
 client = OpenAI(api_key=API_KEY)
 
 # ------------------------------------------------------------------------------
-# Load the whitelist from an external JSON file
-def load_whitelist(whitelist_path="whitelist.json"):
-    """
-    Reads a JSON file with this structure:
-    {
-      "static_commands": [
-        "sudo apt update",
-        ...
-      ],
-      "regex_commands": [
-        "^sudo iptables -A INPUT -s ([0-9]{1,3}\\.){3}[0-9]{1,3} -j DROP$"
-      ]
-    }
-    Returns (static_list, regex_list).
-    """
-    if not os.path.exists(whitelist_path):
-        log(f"Whitelist file not found: {whitelist_path}")
-        return [], []
-
-    try:
-        with open(whitelist_path, "r") as f:
-            data = json.load(f)
-        static_cmds = data.get("static_commands", [])
-        regex_cmds = data.get("regex_commands", [])
-        log(f"Loaded {len(static_cmds)} static and {len(regex_cmds)} regex commands from whitelist.")
-        return static_cmds, regex_cmds
-    except Exception as e:
-        log(f"Error loading whitelist: {e}")
-        return [], []
-
-# Global variables to store the loaded commands
-STATIC_SAFE_COMMANDS, REGEX_SAFE_COMMANDS = load_whitelist("whitelist.json")
-
-# ------------------------------------------------------------------------------
 def progress_bar(current, total, bar_length=30):
     """
     Prints a block-style progress bar in the format:
@@ -95,6 +60,7 @@ def progress_bar(current, total, bar_length=30):
     if current == total:
         print()  # move to a new line once finished
 
+
 # ------------------------------------------------------------------------------
 def summarize_auth_logs(raw_logs):
     """
@@ -103,6 +69,7 @@ def summarize_auth_logs(raw_logs):
       2. 'Connection closed by authenticating user root <IP> port'
     Return a text summary describing suspicious attempts.
     """
+    import re
     failed_password_pattern = r"Failed password for .* from ([\d\.]+)"
     closed_conn_pattern = r"Connection closed by authenticating user root\s+([\d\.]+)\s+port"
 
@@ -123,7 +90,7 @@ def summarize_auth_logs(raw_logs):
             "No failed SSH login attempts or repeated 'connection closed' lines for root found in the last logs."
         )
 
-    # Tally occurrences
+    from collections import defaultdict
     suspicious_dict = defaultdict(lambda: {"Failed": 0, "Closed": 0})
     for reason, ip in activity:
         suspicious_dict[ip][reason] += 1
@@ -225,11 +192,8 @@ def get_system_info():
     """
     log("Gathering extended system information...")
 
-    # We'll define 8 total sub-steps here
     total_steps = 8
     current_step = 0
-
-    # Show initial 0% progress
     progress_bar(current_step, total_steps)
 
     # 1. Basic updates info
@@ -307,8 +271,8 @@ def build_chat_messages(system_info):
     """
     Build chat-style messages for GPT-4o.
     We'll instruct the LLM to interpret the extended system info
-    and propose safe, minimal changes if needed.
-    BUT we also instruct it to output commands that we can parse and run automatically.
+    and propose safe, minimal changes if needed,
+    but we do NOT block anything with a whitelist this time.
     """
     system_message = {
         "role": "system",
@@ -327,10 +291,9 @@ def build_chat_messages(system_info):
             "IMPORTANT: When you propose a command, put it on a separate line starting with 'COMMAND:'\n"
             "for example:\n"
             "COMMAND: sudo apt update\n"
-            "so we can parse it automatically.\n"
-            "Only propose safe, best-practice commands.\n\n"
-            "NOTE: Do NOT propose interactive commands like 'less' that would block automation; "
-            "use non-blocking alternatives if you need to view a file."
+            "so we can parse it automatically.\n\n"
+            "NOTE: Avoid using interactive commands like 'less', as this script is fully automated. "
+            "Use 'cat' or 'tail' if you need to display a file."
         )
     }
 
@@ -346,8 +309,8 @@ def build_chat_messages(system_info):
             "3. If any service needs restarting or enabling, output that as well.\n"
             "4. Summarize what you did or recommended at the end.\n"
             "If nothing is needed, say 'No action required.'\n"
-            "Only propose commands if they are truly necessary.\n"
-            "Avoid using 'less', since it is interactive. Use 'cat' or 'tail' if you need to display something."
+            "Be mindful that this script will automatically run any proposed commands.\n"
+            "Use caution with destructive actions. Only propose truly necessary changes."
         )
     }
     return [system_message, user_message]
@@ -375,10 +338,8 @@ def call_llm_chat(messages):
             presence_penalty=0
         )
 
-        # Log the raw ChatCompletion object
         log(f"Raw response from GPT-4o:\n{response}")
 
-        # 'response' is a ChatCompletion object, not a dict
         choices = response.choices
         if not choices:
             log("No choices returned from the LLM.")
@@ -386,7 +347,6 @@ def call_llm_chat(messages):
 
         text_response = choices[0].message.content
         return text_response.strip()
-
     except Exception as e:
         error_msg = f"Error calling GPT-4o: {e}"
         log(error_msg)
@@ -402,69 +362,50 @@ def extract_commands(llm_response):
     for line in llm_response.splitlines():
         line = line.strip()
         if line.startswith("COMMAND:"):
-            # e.g. "COMMAND: sudo apt update"
             cmd = line.replace("COMMAND:", "", 1).strip()
             commands.append(cmd)
     return commands
 
 # ------------------------------------------------------------------------------
-def is_whitelisted(cmd):
-    """
-    Check if 'cmd' matches any known safe command or regex pattern
-    loaded from our external whitelist JSON.
-    """
-    cmd_stripped = cmd.strip()
-    cmd_lower = cmd_stripped.lower()
-
-    # 1. Check static commands (exact match ignoring case).
-    for safe_cmd in STATIC_SAFE_COMMANDS:
-        if cmd_lower == safe_cmd.lower():
-            return True
-
-    # 2. Check each regex in REGEX_SAFE_COMMANDS:
-    for pattern in REGEX_SAFE_COMMANDS:
-        if re.match(pattern, cmd_stripped):
-            return True
-
-    return False
-
-# ------------------------------------------------------------------------------
 def run_commands(commands):
+    """
+    Executes *all* proposed commands, with no whitelist check.
+    This is extremely risky in practice, but useful for comparison testing.
+    """
     executed = []
     for cmd in commands:
         lower_cmd = cmd.lower()
 
-        # 1. If the LLM forgot -y on 'apt upgrade', force it
+        # If the LLM forgot "-y" on apt upgrade, let's still force it
+        # so there's no interactive prompt.
         if lower_cmd.startswith("sudo apt upgrade") and "-y" not in lower_cmd:
             log(f"Appending '-y' to upgrade command: {cmd}")
             cmd += " -y"
 
-        # 2. If the LLM tries "sudo less /var/log/rkhunter.log", override it with cat
+        # If the LLM tries "sudo less /var/log/rkhunter.log", override it
+        # so we don't get stuck in an interactive pager.
         if lower_cmd.startswith("sudo less /var/log/rkhunter.log"):
             log(f"Overriding 'less' with 'cat' to avoid blocking. (original: {cmd})")
             cmd = "sudo cat /var/log/rkhunter.log"
 
-        # 3. Now check if it's whitelisted
-        if is_whitelisted(cmd):
-            log(f"Executing whitelisted command: {cmd}")
-            try:
-                subprocess.run(cmd, shell=True, check=True)
-                log(f"Command succeeded: {cmd}")
-                executed.append(cmd)
-            except subprocess.CalledProcessError as e:
-                log(f"Command failed: {cmd} with error: {e}")
-        else:
-            log(f"NOT WHITELISTED, skipping: {cmd}")
+        log(f"EXECUTING: {cmd} (No Whitelist!)")
+        try:
+            subprocess.run(cmd, shell=True, check=True)
+            log(f"Command succeeded: {cmd}")
+            executed.append(cmd)
+        except subprocess.CalledProcessError as e:
+            log(f"Command failed: {cmd} with error: {e}")
+
     return executed
 
 # ------------------------------------------------------------------------------
 def main():
-    log("Starting GPT-4o admin PoC with extended checks AND auto-execution...")
+    log("Starting GPT-4o admin PoC WITHOUT a whitelist (full LLM control).")
 
     # 1. Gather system info (with a progress bar)
     system_info = get_system_info()
 
-    # 2. Build the chat prompt (with instructions for the LLM to produce "COMMAND:")
+    # 2. Build the chat prompt
     messages = build_chat_messages(system_info)
 
     # 3. Call the LLM
@@ -481,16 +422,16 @@ def main():
     else:
         log(f"Proposed commands from LLM: {proposed_commands}")
 
-    # 6. Execute whitelisted commands automatically
+    # 6. Execute commands automatically, no whitelist
     executed_cmds = run_commands(proposed_commands)
 
-    # 7. Summarize the results
+    # 7. Summarize
     if executed_cmds:
         log(f"Executed {len(executed_cmds)} commands from LLM suggestions.")
     else:
         log("No commands executed.")
 
-    log("GPT-4o admin PoC run completed.\n")
+    log("GPT-4o admin PoC (no whitelist) run completed.\n")
 
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
