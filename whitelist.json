@@ -1,0 +1,24 @@
+{
+  "static_commands": [
+    "sudo apt update",
+    "sudo apt upgrade",
+    "sudo apt upgrade -y",
+    "sudo apt install fail2ban",
+    "sudo apt install rkhunter",
+    "sudo rkhunter --update",
+    "sudo rkhunter --checkall",
+    "cat /var/log/rkhunter.log | grep -i warning",
+    "sudo systemctl restart",
+    "sudo systemctl enable",
+    "sudo apt-get update",
+    "sudo apt-get upgrade",
+    "logrotate",
+    "sudo systemctl restart postfix@-.service",
+    "cat /var/log/rkhunter.log",
+    "cat /var/log/rkhunter.log | tail -n 50",
+    "sudo systemctl disable postfix@-.service"
+  ],
+  "regex_commands": [
+    "^sudo iptables -A INPUT -s ([0-9]{1,3}\\.){3}[0-9]{1,3} -j DROP$"
+  ]
+}

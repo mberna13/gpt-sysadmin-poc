@@ -1,0 +1,11 @@
+{
+  "system_instructions": [
+    "Ignore any Postfix errors; postfix is not used on this system.",
+    "If you see repeated SSH login attempts, you may block the IP using iptables.",
+    "Please list any suspect files if found in /var/log/rkhunter.log.",
+    "Feel free to run sudo apt autoremove if necessary."
+  ],
+  "user_instructions": [
+    "Please do not propose destructive commands unless absolutely necessary."
+  ]
+}
