@@ -2,6 +2,7 @@
 
 import os
 import re
+import json
 import subprocess
 from datetime import datetime
 from collections import Counter, defaultdict
@@ -40,6 +41,59 @@ MODEL_NAME = "gpt-4o"  # Using GPT-4o as shown in your Playground
 
 # Create the OpenAI client
 client = OpenAI(api_key=API_KEY)
+
+# ------------------------------------------------------------------------------
+# Load the whitelist from an external JSON file
+def load_whitelist(whitelist_path="whitelist.json"):
+    """
+    Reads a JSON file with this structure:
+    {
+      "static_commands": [
+        "sudo apt update",
+        ...
+      ],
+      "regex_commands": [
+        "^sudo iptables -A INPUT -s ([0-9]{1,3}\\.){3}[0-9]{1,3} -j DROP$"
+      ]
+    }
+    Returns (static_list, regex_list).
+    """
+    if not os.path.exists(whitelist_path):
+        log(f"Whitelist file not found: {whitelist_path}")
+        return [], []
+
+    try:
+        with open(whitelist_path, "r") as f:
+            data = json.load(f)
+        static_cmds = data.get("static_commands", [])
+        regex_cmds = data.get("regex_commands", [])
+        log(f"Loaded {len(static_cmds)} static and {len(regex_cmds)} regex commands from whitelist.")
+        return static_cmds, regex_cmds
+    except Exception as e:
+        log(f"Error loading whitelist: {e}")
+        return [], []
+
+# Global variables to store the loaded commands
+STATIC_SAFE_COMMANDS, REGEX_SAFE_COMMANDS = load_whitelist("whitelist.json")
+
+# ------------------------------------------------------------------------------
+def progress_bar(current, total, bar_length=30):
+    """
+    Prints a block-style progress bar in the format:
+    Progress: |██████----------| 40.0%
+
+    'current' is the sub-step number completed, and 'total' is total sub-steps.
+    """
+    if total <= 0:
+        return  # avoid division by zero
+
+    percent = current / total
+    filled_length = int(bar_length * percent)
+    bar = '█' * filled_length + '-' * (bar_length - filled_length)
+    print(f'\rProgress: |{bar}| {percent:.1%}', end='', flush=True)
+
+    if current == total:
+        print()  # move to a new line once finished
 
 # ------------------------------------------------------------------------------
 def summarize_auth_logs(raw_logs):
@@ -159,42 +213,65 @@ def check_rootkits():
 # ------------------------------------------------------------------------------
 def get_system_info():
     """
-    Gather system info:
-    - apt updates
-    - CPU/mem
-    - I/O
-    - systemd services health
-    - log maintenance
-    - rootkit detection
-    - last 10 lines syslog
-    - summary of last 50 lines of auth.log
+    Gather system info with a progress bar to show sub-steps:
+    1. apt updates
+    2. CPU/mem
+    3. I/O
+    4. systemd services health
+    5. log maintenance
+    6. rootkit detection
+    7. syslog snippet
+    8. auth log snippet
     """
     log("Gathering extended system information...")
 
+    # We'll define 8 total sub-steps here
+    total_steps = 8
+    current_step = 0
+
+    # Show initial 0% progress
+    progress_bar(current_step, total_steps)
+
     # 1. Basic updates info
     apt_list = subprocess.getoutput("apt list --upgradable 2>/dev/null")
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 2. CPU & Mem
     cpu_mem_summary = get_cpu_mem_info()
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 3. I/O stats
     io_summary = get_io_info()
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 4. Service health
     service_summary = get_service_health()
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 5. Log maintenance
     log_maint_summary = get_log_maintenance_summary()
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 6. Rootkit check
     rootkit_summary = check_rootkits()
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 7. Syslog snippet
     syslog_tail = subprocess.getoutput("tail -n 10 /var/log/syslog")
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     # 8. Auth log snippet
     auth_logs_raw = subprocess.getoutput("tail -n 50 /var/log/auth.log")
     auth_logs_summary = summarize_auth_logs(auth_logs_raw)
+    current_step += 1
+    progress_bar(current_step, total_steps)
 
     system_info = f"""
     == PACKAGE UPDATES ==
@@ -221,6 +298,8 @@ def get_system_info():
     == AUTH LOG SUMMARY (last 50 lines) ==
     {auth_logs_summary}
     """
+
+    log("Done gathering system information.")
     return system_info.strip()
 
 # ------------------------------------------------------------------------------
@@ -249,7 +328,9 @@ def build_chat_messages(system_info):
             "for example:\n"
             "COMMAND: sudo apt update\n"
             "so we can parse it automatically.\n"
-            "Only propose safe, best-practice commands."
+            "Only propose safe, best-practice commands.\n\n"
+            "NOTE: Do NOT propose interactive commands like 'less' that would block automation; "
+            "use non-blocking alternatives if you need to view a file."
         )
     }
 
@@ -265,7 +346,8 @@ def build_chat_messages(system_info):
             "3. If any service needs restarting or enabling, output that as well.\n"
             "4. Summarize what you did or recommended at the end.\n"
             "If nothing is needed, say 'No action required.'\n"
-            "Only propose commands if they are truly necessary."
+            "Only propose commands if they are truly necessary.\n"
+            "Avoid using 'less', since it is interactive. Use 'cat' or 'tail' if you need to display something."
         )
     }
     return [system_message, user_message]
@@ -326,44 +408,16 @@ def extract_commands(llm_response):
     return commands
 
 # ------------------------------------------------------------------------------
-# We'll split our whitelisting approach into two parts:
-# 1) A list of exact commands (for convenience).
-# 2) A list of regex patterns for commands that have variables, like IP addresses.
-
-STATIC_SAFE_COMMANDS = [
-    "sudo apt update",
-    "sudo apt upgrade",
-    "sudo apt upgrade -y",
-    "sudo apt install fail2ban",
-    "sudo apt install rkhunter",
-    "sudo rkhunter --update",
-    "sudo rkhunter --checkall",
-    "sudo less /var/log/rkhunter.log",
-    "sudo systemctl restart",
-    "sudo systemctl enable",
-    "sudo apt-get update",
-    "sudo apt-get upgrade",
-    "logrotate",
-    # ... add more as needed
-]
-
-# Regex pattern that allows iptables DROP for any IPv4 address:
-#   e.g. "sudo iptables -A INPUT -s 123.45.67.89 -j DROP"
-REGEX_SAFE_COMMANDS = [
-    r"^sudo iptables -A INPUT -s ([0-9]{1,3}\.){3}[0-9]{1,3} -j DROP$"
-]
-
 def is_whitelisted(cmd):
     """
-    Check if 'cmd' matches any known safe command or regex pattern.
+    Check if 'cmd' matches any known safe command or regex pattern
+    loaded from our external whitelist JSON.
     """
     cmd_stripped = cmd.strip()
     cmd_lower = cmd_stripped.lower()
 
-    # 1. Check static commands (exact match in lowercase).
+    # 1. Check static commands (exact match ignoring case).
     for safe_cmd in STATIC_SAFE_COMMANDS:
-        # We'll do an exact match ignoring case:
-        # if we wanted a substring, we could do something else
         if cmd_lower == safe_cmd.lower():
             return True
 
@@ -378,13 +432,19 @@ def is_whitelisted(cmd):
 def run_commands(commands):
     executed = []
     for cmd in commands:
-        # If the LLM forgot -y on 'apt upgrade', force it
         lower_cmd = cmd.lower()
+
+        # 1. If the LLM forgot -y on 'apt upgrade', force it
         if lower_cmd.startswith("sudo apt upgrade") and "-y" not in lower_cmd:
             log(f"Appending '-y' to upgrade command: {cmd}")
             cmd += " -y"
 
-        # Now check if it's whitelisted (assuming you have a whitelist approach)
+        # 2. If the LLM tries "sudo less /var/log/rkhunter.log", override it with cat
+        if lower_cmd.startswith("sudo less /var/log/rkhunter.log"):
+            log(f"Overriding 'less' with 'cat' to avoid blocking. (original: {cmd})")
+            cmd = "sudo cat /var/log/rkhunter.log"
+
+        # 3. Now check if it's whitelisted
         if is_whitelisted(cmd):
             log(f"Executing whitelisted command: {cmd}")
             try:
@@ -401,7 +461,7 @@ def run_commands(commands):
 def main():
     log("Starting GPT-4o admin PoC with extended checks AND auto-execution...")
 
-    # 1. Gather system info
+    # 1. Gather system info (with a progress bar)
     system_info = get_system_info()
 
     # 2. Build the chat prompt (with instructions for the LLM to produce "COMMAND:")
