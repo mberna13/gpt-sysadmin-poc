@@ -7,8 +7,14 @@ import subprocess
 from datetime import datetime
 from collections import Counter, defaultdict
 
-GREEN = "\033[92m"   # ANSI code for bright green
-RESET = "\033[0m"    # ANSI code to reset to default color
+# ANSI color codes
+GREEN = "\033[92m"      # Bright green
+RESET = "\033[0m"       # Reset to default color
+RED = "\033[91m"        # Bright red
+LIGHT_BLUE = "\033[94m" # Bright blue
+ORANGE_APPROX = "\033[93m"
+ORANGE_256 = "\033[38;5;208m"
+
 # ------------------------------------------------------------------------------
 # Instead of importing openai directly, we import the OpenAI client
 try:
@@ -20,9 +26,12 @@ except ImportError:
     )
 
 # ------------------------------------------------------------------------------
-# Generate a daily log filename based on YYYYMMDD
-TODAY = datetime.now().strftime('%Y%m%d')
-LOG_FILE = f"llm_admin_poc_{TODAY}.log"
+# Generate a log filename that includes date & time, stored in logs/ directory
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)  # Create logs/ if it doesn't exist
+
+TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')  # e.g. 20250113_213045
+LOG_FILE = os.path.join(LOG_DIR, f"llm_admin_poc_{TIMESTAMP}.log")
 
 # ------------------------------------------------------------------------------
 # Logging setup
@@ -49,7 +58,6 @@ def progress_bar(current, total, bar_length=30):
     """
     Prints a block-style progress bar in the format:
     Progress: |██████----------| 40.0%
-
     'current' is the sub-step number completed, and 'total' is total sub-steps.
     """
     if total <= 0:
@@ -345,7 +353,7 @@ def call_llm_chat(messages):
             frequency_penalty=0,
             presence_penalty=0
         )
-        log(f"Raw response from GPT-4o:\n{response}")
+        log(f"Raw response from {MODEL_NAME}:\n{response}")
 
         choices = response.choices
         if not choices:
@@ -353,9 +361,8 @@ def call_llm_chat(messages):
             return ""
         text_response = choices[0].message.content
         return text_response.strip()
-
     except Exception as e:
-        error_msg = f"Error calling GPT-4o: {e}"
+        error_msg = f"Error calling {MODEL_NAME}: {e}"
         log(error_msg)
         return ""
 
@@ -397,10 +404,10 @@ def run_commands(commands):
         log(f"EXECUTING: {cmd} (No Whitelist!)")
         try:
             subprocess.run(cmd, shell=True, check=True)
-            log(f"{GREEN}Command succeeded:{RESET} {cmd}")
+            log(f"{LIGHT_BLUE}Command succeeded:{RESET} {cmd}")
             executed.append(cmd)
         except subprocess.CalledProcessError as e:
-            log(f"Command failed: {cmd} with error: {e}")
+            log(f"{RED}Command failed:{RESET} {cmd} with error: {e}")
 
     return executed
 
