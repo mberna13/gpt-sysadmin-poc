@@ -158,7 +158,70 @@ def check_rootkits():
         return "\n".join(summary_lines)
     else:
         return "Ran rkhunter check but could not parse a summary. Check logs manually."
+# ------------------------------------------------------------------------------
+def check_apache_access_log(log_path="/var/log/apache2/access.log", num_lines=200):
+    """
+    Checks the last `num_lines` lines of an Apache access log for suspicious requests
+    targeting wp-login.php (WordPress) or phpMyAdmin (pma).
+    Returns a summary string describing suspicious IPs or 'No suspicious activity' if none found.
 
+    Example suspicious patterns:
+      - /wp-login.php
+      - /wp-admin/
+      - /phpmyadmin
+      - /pma
+      - /admin/pma
+    """
+
+    # If the log doesn't exist or we don't have read permission, handle gracefully:
+    if not os.path.exists(log_path):
+        return f"Apache access log not found at {log_path}."
+
+    # Tail the last `num_lines` lines
+    cmd = f"tail -n {num_lines} {log_path}"
+    try:
+        access_data = subprocess.getoutput(cmd)
+    except Exception as e:
+        return f"Error reading Apache log: {e}"
+
+    # Patterns to flag: expand or edit as needed
+    suspicious_patterns = [
+        r"wp-login\.php",
+        r"wp-admin",
+        r"phpmyadmin",
+        r"/pma",
+    ]
+
+    # IP aggregator for suspicious requests
+    from collections import defaultdict
+    suspicious_ips = defaultdict(int)
+
+    # Simple approach: each line in combined log format has an IP as the first token
+    # e.g. 111.222.333.444 - - [13/Jan/2025:21:33:55 +0000] "GET /wp-login.php ...
+    lines = access_data.splitlines()
+    for line in lines:
+        parts = line.split()
+        if not parts:
+            continue
+
+        # The IP is usually the first token in standard logs (unless there's a reverse-proxy, etc.)
+        ip = parts[0]
+
+        # Check if line contains any suspicious pattern
+        for pattern in suspicious_patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                suspicious_ips[ip] += 1
+                break
+
+    if not suspicious_ips:
+        return f"No suspicious WP/phpMyAdmin activity in the last {num_lines} lines."
+
+    # Build a short summary
+    summary_lines = [f"Suspicious requests found in the last {num_lines} lines of Apache access log:"]
+    for ip, count in suspicious_ips.items():
+        summary_lines.append(f"  IP {ip} -> {count} suspicious request(s).")
+
+    return "\n".join(summary_lines)
 # ------------------------------------------------------------------------------
 def get_system_info():
     """
@@ -172,6 +235,7 @@ def get_system_info():
     7. syslog snippet
     8. auth log snippet
     9. disk usage
+    10. check apache access log
     """
     log("Gathering extended system information...")
 
@@ -215,13 +279,18 @@ def get_system_info():
     progress_bar(current_step, total_steps)
 
     # 8. Auth log snippet
-    auth_logs_raw = subprocess.getoutput("tail -n 50 /var/log/auth.log")
+    auth_logs_raw = subprocess.getoutput("tail -n 200 /var/log/auth.log")
     auth_logs_summary = summarize_auth_logs(auth_logs_raw)
     current_step += 1
     progress_bar(current_step, total_steps)
 
     # 9. Disk usage
     df_out = subprocess.getoutput("df -h")
+    current_step += 1
+    progress_bar(current_step, total_steps)
+
+    # 10.
+    apache_access_log_summary = check_apache_access_log()
     current_step += 1
     progress_bar(current_step, total_steps)
 
@@ -252,6 +321,9 @@ def get_system_info():
 
     == DISK USAGE ==
     {df_out}
+    
+    == APACHE ACCESS LOG SUMMARY ==
+    {apache_access_log_summary}
     """
 
     log("Done gathering system information.")
@@ -293,13 +365,14 @@ def build_chat_messages(system_info, extra_system, extra_user):
         "Analyze the provided system state, which includes:\n"
         " - Package updates (if any)\n"
         " - CPU/Memory usage - feel free to kill any processes if they're using too many resources\n"
-        " - Disk usage - please delete any old files if the disk is nearly full\n"
         " - Disk I/O stats\n"
         " - System services health\n"
         " - Log maintenance potential\n"
         " - Rootkit detection summary\n"
         " - Syslog snippet\n"
         " - SSH auth log summary for failed brute force login attempts - block these using iptables\n\n"
+        " - Disk usage - please delete any old files if the disk is nearly full\n"
+        " - Apache access log summary for attempted brute force exploit attempts (e.g., WordPress and phpMyAdmin) - block these using iptables\n\n"
         "IMPORTANT: When you propose a command, put it on a separate line starting with 'COMMAND:'\n"
         "for example:\n"
         "COMMAND: sudo apt update\n"
