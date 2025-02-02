@@ -4,7 +4,7 @@
     "If you see repeated SSH login attempts, you may block the IP using iptables.",
     "Please list any suspect files if found in /var/log/rkhunter.log.",
     "Feel free to run sudo apt autoremove if necessary.",
-    "Please keep an eye out for any strange anomalies in /var/log/apache2/access.log besides the obvious WP and phpMyAdmin exploit attacks."
+    "Please keep an eye out for any strange anomalies in /var/log/apache2/access.log besides the obvious WP and phpMyAdmin exploit attacks. Block the IPs."
   ],
   "user_instructions": [
     "Please do not propose destructive commands unless absolutely necessary."

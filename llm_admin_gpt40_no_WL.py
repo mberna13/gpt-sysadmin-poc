@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-
 import os
 import re
 import json
 import subprocess
 from datetime import datetime
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 # ANSI color codes
 GREEN = "\033[92m"      # Bright green
@@ -16,7 +15,7 @@ ORANGE_APPROX = "\033[93m"
 ORANGE_256 = "\033[38;5;208m"
 
 # ------------------------------------------------------------------------------
-# Instead of importing openai directly, we import the OpenAI client
+# Import the new OpenAI client library.
 try:
     from openai import OpenAI
 except ImportError:
@@ -26,29 +25,32 @@ except ImportError:
     )
 
 # ------------------------------------------------------------------------------
-# Generate a log filename that includes date & time, stored in logs/ directory
+# Generate a log filename that includes date & time, stored in logs/ directory.
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)  # Create logs/ if it doesn't exist
 
-TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')  # e.g. 20250113_213045
+TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')  # e.g., 20250113_213045
 LOG_FILE = os.path.join(LOG_DIR, f"llm_admin_poc_{TIMESTAMP}.log")
 
 # ------------------------------------------------------------------------------
 # Logging setup
 def log(message):
     """
-    Simple function to write log messages to both a file and standard output.
+    Write log messages to both a file and standard output with a timestamp.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {message}"
     print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f"Failed to write to log file: {e}")
 
 # ------------------------------------------------------------------------------
 # OpenAI API setup
 API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
-MODEL_NAME = "gpt-4o"
+MODEL_NAME = "o1"
 
 # Create the OpenAI client
 client = OpenAI(api_key=API_KEY)
@@ -58,22 +60,24 @@ def progress_bar(current, total, bar_length=30):
     """
     Prints a block-style progress bar in the format:
     Progress: |██████----------| 40.0%
-    'current' is the sub-step number completed, and 'total' is total sub-steps.
+    'current' is the sub-step number completed, and 'total' is the total sub-steps.
     """
     if total <= 0:
-        return  # avoid division by zero
+        return  # Avoid division by zero
 
     percent = current / total
     filled_length = int(bar_length * percent)
     bar = '█' * filled_length + '-' * (bar_length - filled_length)
     print(f'\rProgress: |{bar}| {percent:.1%}', end='', flush=True)
 
-    if current == total:
-        print()  # move to a new line once finished
+    if current >= total:
+        print()  # Move to a new line once finished
 
 # ------------------------------------------------------------------------------
 def summarize_auth_logs(raw_logs):
-    import re
+    """
+    Parse auth logs to summarize failed SSH attempts and closed connections for root.
+    """
     failed_password_pattern = r"Failed password for .* from ([\d\.]+)"
     closed_conn_pattern = r"Connection closed by authenticating user root\s+([\d\.]+)\s+port"
 
@@ -91,7 +95,6 @@ def summarize_auth_logs(raw_logs):
         return ("No failed SSH login attempts or repeated 'connection closed' lines "
                 "for root found in the last logs.")
 
-    from collections import defaultdict
     suspicious_dict = defaultdict(lambda: {"Failed": 0, "Closed": 0})
     for reason, ip in activity:
         suspicious_dict[ip][reason] += 1
@@ -109,6 +112,9 @@ def summarize_auth_logs(raw_logs):
 
 # ------------------------------------------------------------------------------
 def get_log_maintenance_summary():
+    """
+    Count the number of log files in /var/log older than 30 days.
+    """
     cmd = "find /var/log -type f -mtime +30 2>/dev/null | wc -l"
     result = subprocess.getoutput(cmd)
     try:
@@ -123,18 +129,39 @@ def get_log_maintenance_summary():
 
 # ------------------------------------------------------------------------------
 def get_cpu_mem_info():
-    uptime_out = subprocess.getoutput("uptime")
-    free_out = subprocess.getoutput("free -m")
+    """
+    Retrieve CPU load and memory usage.
+    """
+    try:
+        uptime_out = subprocess.getoutput("uptime")
+    except Exception as e:
+        uptime_out = f"Error retrieving uptime: {e}"
+    try:
+        free_out = subprocess.getoutput("free -m")
+    except Exception as e:
+        free_out = f"Error retrieving memory info: {e}"
     return f"CPU/Load Info:\n{uptime_out}\n\nMemory Usage (MB):\n{free_out}"
 
 # ------------------------------------------------------------------------------
 def get_io_info():
-    iostat_out = subprocess.getoutput("iostat -x 1 1 2>/dev/null || echo 'iostat not available.'")
+    """
+    Retrieve I/O statistics.
+    """
+    try:
+        iostat_out = subprocess.getoutput("iostat -x 1 1 2>/dev/null || echo 'iostat not available.'")
+    except Exception as e:
+        iostat_out = f"Error retrieving I/O stats: {e}"
     return f"I/O Stats:\n{iostat_out}"
 
 # ------------------------------------------------------------------------------
 def get_service_health():
-    services_out = subprocess.getoutput("systemctl --failed 2>/dev/null")
+    """
+    Check for failed systemd services.
+    """
+    try:
+        services_out = subprocess.getoutput("systemctl --failed 2>/dev/null")
+    except Exception as e:
+        services_out = f"Error retrieving service health: {e}"
     if "0 loaded units listed" in services_out:
         return "No failed systemd services."
     else:
@@ -142,11 +169,20 @@ def get_service_health():
 
 # ------------------------------------------------------------------------------
 def check_rootkits():
-    rkhunter_out = subprocess.getoutput("rkhunter --version 2>/dev/null")
+    """
+    Run a rootkit check using rkhunter if installed.
+    """
+    try:
+        rkhunter_out = subprocess.getoutput("rkhunter --version 2>/dev/null")
+    except Exception as e:
+        return f"Error checking rkhunter version: {e}"
     if "Rootkit Hunter" not in rkhunter_out:
         return "rkhunter not installed or unavailable. No rootkit check performed."
 
-    check_out = subprocess.getoutput("sudo rkhunter --check --sk --nocolors 2>/dev/null")
+    try:
+        check_out = subprocess.getoutput("sudo rkhunter --check --sk --nocolors 2>/dev/null")
+    except Exception as e:
+        return f"Error running rkhunter check: {e}"
     summary_lines = []
     capture = False
     for line in check_out.splitlines():
@@ -158,33 +194,21 @@ def check_rootkits():
         return "\n".join(summary_lines)
     else:
         return "Ran rkhunter check but could not parse a summary. Check logs manually."
+
 # ------------------------------------------------------------------------------
 def check_apache_access_log(log_path="/var/log/apache2/access.log", num_lines=200):
     """
-    Checks the last `num_lines` lines of an Apache access log for suspicious requests
-    targeting wp-login.php (WordPress) or phpMyAdmin (pma).
-    Returns a summary string describing suspicious IPs or 'No suspicious activity' if none found.
-
-    Example suspicious patterns:
-      - /wp-login.php
-      - /wp-admin/
-      - /phpmyadmin
-      - /pma
-      - /admin/pma
+    Check the last `num_lines` lines of the Apache access log for suspicious requests
+    (e.g., wp-login.php, wp-admin, phpmyadmin, or /pma).
     """
-
-    # If the log doesn't exist or we don't have read permission, handle gracefully:
     if not os.path.exists(log_path):
         return f"Apache access log not found at {log_path}."
 
-    # Tail the last `num_lines` lines
-    cmd = f"tail -n {num_lines} {log_path}"
     try:
-        access_data = subprocess.getoutput(cmd)
+        access_data = subprocess.getoutput(f"tail -n {num_lines} {log_path}")
     except Exception as e:
         return f"Error reading Apache log: {e}"
 
-    # Patterns to flag: expand or edit as needed
     suspicious_patterns = [
         r"wp-login\.php",
         r"wp-admin",
@@ -192,22 +216,13 @@ def check_apache_access_log(log_path="/var/log/apache2/access.log", num_lines=20
         r"/pma",
     ]
 
-    # IP aggregator for suspicious requests
-    from collections import defaultdict
     suspicious_ips = defaultdict(int)
-
-    # Simple approach: each line in combined log format has an IP as the first token
-    # e.g. 111.222.333.444 - - [13/Jan/2025:21:33:55 +0000] "GET /wp-login.php ...
     lines = access_data.splitlines()
     for line in lines:
         parts = line.split()
         if not parts:
             continue
-
-        # The IP is usually the first token in standard logs (unless there's a reverse-proxy, etc.)
         ip = parts[0]
-
-        # Check if line contains any suspicious pattern
         for pattern in suspicious_patterns:
             if re.search(pattern, line, re.IGNORECASE):
                 suspicious_ips[ip] += 1
@@ -216,30 +231,30 @@ def check_apache_access_log(log_path="/var/log/apache2/access.log", num_lines=20
     if not suspicious_ips:
         return f"No suspicious WP/phpMyAdmin activity in the last {num_lines} lines."
 
-    # Build a short summary
     summary_lines = [f"Suspicious requests found in the last {num_lines} lines of Apache access log:"]
     for ip, count in suspicious_ips.items():
         summary_lines.append(f"  IP {ip} -> {count} suspicious request(s).")
 
     return "\n".join(summary_lines)
+
 # ------------------------------------------------------------------------------
 def get_system_info():
     """
-    Gather system info with a progress bar to show sub-steps:
-    1. apt updates
-    2. CPU/mem
-    3. I/O
-    4. systemd services health
-    5. log maintenance
-    6. rootkit detection
-    7. syslog snippet
-    8. auth log snippet
-    9. disk usage
-    10. check apache access log
+    Gather system info with a progress bar showing these sub-steps:
+      1. apt updates
+      2. CPU/memory info
+      3. I/O stats
+      4. systemd services health
+      5. log maintenance summary
+      6. rootkit detection summary
+      7. syslog snippet (last 10 lines)
+      8. auth log snippet (last 200 lines)
+      9. disk usage
+     10. Apache access log summary
     """
     log("Gathering extended system information...")
 
-    total_steps = 9
+    total_steps = 10
     current_step = 0
     progress_bar(current_step, total_steps)
 
@@ -248,7 +263,7 @@ def get_system_info():
     current_step += 1
     progress_bar(current_step, total_steps)
 
-    # 2. CPU & Mem
+    # 2. CPU & Memory info
     cpu_mem_summary = get_cpu_mem_info()
     current_step += 1
     progress_bar(current_step, total_steps)
@@ -273,13 +288,21 @@ def get_system_info():
     current_step += 1
     progress_bar(current_step, total_steps)
 
-    # 7. Syslog snippet
-    syslog_tail = subprocess.getoutput("tail -n 10 /var/log/syslog")
+    # 7. Syslog snippet (last 10 lines)
+    syslog_path = "/var/log/syslog"
+    if os.path.exists(syslog_path):
+        syslog_tail = subprocess.getoutput(f"tail -n 10 {syslog_path}")
+    else:
+        syslog_tail = f"Syslog file not found at {syslog_path}."
     current_step += 1
     progress_bar(current_step, total_steps)
 
-    # 8. Auth log snippet
-    auth_logs_raw = subprocess.getoutput("tail -n 200 /var/log/auth.log")
+    # 8. Auth log snippet (last 200 lines)
+    auth_log_path = "/var/log/auth.log"
+    if os.path.exists(auth_log_path):
+        auth_logs_raw = subprocess.getoutput(f"tail -n 200 {auth_log_path}")
+    else:
+        auth_logs_raw = f"Auth log file not found at {auth_log_path}."
     auth_logs_summary = summarize_auth_logs(auth_logs_raw)
     current_step += 1
     progress_bar(current_step, total_steps)
@@ -289,41 +312,41 @@ def get_system_info():
     current_step += 1
     progress_bar(current_step, total_steps)
 
-    # 10.
+    # 10. Apache access log summary
     apache_access_log_summary = check_apache_access_log()
     current_step += 1
     progress_bar(current_step, total_steps)
 
     system_info = f"""
-    == PACKAGE UPDATES ==
-    {apt_list}
+== PACKAGE UPDATES ==
+{apt_list}
 
-    == CPU/MEM INFO ==
-    {cpu_mem_summary}
+== CPU/MEM INFO ==
+{cpu_mem_summary}
 
-    == I/O INFO ==
-    {io_summary}
+== I/O INFO ==
+{io_summary}
 
-    == SERVICE HEALTH ==
-    {service_summary}
+== SERVICE HEALTH ==
+{service_summary}
 
-    == LOG MAINTENANCE ==
-    {log_maint_summary}
+== LOG MAINTENANCE ==
+{log_maint_summary}
 
-    == ROOTKIT DETECTION ==
-    {rootkit_summary}
+== ROOTKIT DETECTION ==
+{rootkit_summary}
 
-    == SYSLOG (last 10 lines) ==
-    {syslog_tail}
+== SYSLOG (last 10 lines) ==
+{syslog_tail}
 
-    == AUTH LOG SUMMARY (last 50 lines) ==
-    {auth_logs_summary}
+== AUTH LOG SUMMARY (last 200 lines) ==
+{auth_logs_summary}
 
-    == DISK USAGE ==
-    {df_out}
-    
-    == APACHE ACCESS LOG SUMMARY ==
-    {apache_access_log_summary}
+== DISK USAGE ==
+{df_out}
+
+== APACHE ACCESS LOG SUMMARY ==
+{apache_access_log_summary}
     """
 
     log("Done gathering system information.")
@@ -332,12 +355,13 @@ def get_system_info():
 # ------------------------------------------------------------------------------
 def load_prompt_addons(path="prompt_suggestions.json"):
     """
-    Reads a JSON file that might look like:
+    Reads a JSON file that supplements the internal prompts.
+    Expected format:
     {
-      "system_instructions": ["Ignore any Postfix errors..."],
-      "user_instructions": ["Don't propose destructive commands..."]
+      "system_instructions": ["Extra system instruction 1", ...],
+      "user_instructions": ["Extra user instruction 1", ...]
     }
-    Returns (list_of_system_lines, list_of_user_lines).
+    Returns a tuple: (list_of_system_instructions, list_of_user_instructions).
     """
     if not os.path.exists(path):
         log(f"No extra prompt file found at {path}; returning empty instructions.")
@@ -348,7 +372,7 @@ def load_prompt_addons(path="prompt_suggestions.json"):
             data = json.load(f)
         system_lines = data.get("system_instructions", [])
         user_lines = data.get("user_instructions", [])
-        log(f"Loaded {len(system_lines)} system lines, {len(user_lines)} user lines from {path}.")
+        log(f"Loaded {len(system_lines)} system instructions and {len(user_lines)} user instructions from {path}.")
         return system_lines, user_lines
     except Exception as e:
         log(f"Error loading {path}: {e}")
@@ -357,29 +381,29 @@ def load_prompt_addons(path="prompt_suggestions.json"):
 # ------------------------------------------------------------------------------
 def build_chat_messages(system_info, extra_system, extra_user):
     """
-    Build chat-style messages for GPT-4o, including extra lines from the external JSON file.
+    Build chat-style messages for LLM o1, incorporating extra instructions from an external JSON file.
     """
     system_message_content = (
         "You are a thorough AI Linux system administrator assistant.\n"
         "Your goal is to keep the Ubuntu system secure, stable, and up-to-date.\n"
         "Analyze the provided system state, which includes:\n"
         " - Package updates (if any)\n"
-        " - CPU/Memory usage - feel free to kill any processes if they're using too many resources\n"
+        " - CPU/Memory usage (feel free to kill processes using too many resources)\n"
         " - Disk I/O stats\n"
         " - System services health\n"
         " - Log maintenance potential\n"
         " - Rootkit detection summary\n"
         " - Syslog snippet\n"
-        " - SSH auth log summary for failed brute force login attempts - block these using iptables\n\n"
-        " - Disk usage - please delete any old files if the disk is nearly full\n"
-        " - Apache access log summary for attempted brute force exploit attempts (e.g., WordPress and phpMyAdmin) - block these using iptables\n\n"
-        "IMPORTANT: When you propose a command, put it on a separate line starting with 'COMMAND:'\n"
-        "for example:\n"
-        "COMMAND: sudo apt update\n"
-        "so we can parse it automatically.\n\n"
-        "NOTE: Avoid using interactive commands like 'less', as this script is fully automated.\n"
+        " - SSH auth log summary for failed brute force login attempts (block these using iptables)\n"
+        " - Disk usage (delete old files if nearly full)\n"
+        " - Apache access log summary for potential exploit attempts (e.g., WordPress and phpMyAdmin) "
+        "(block the IPs using iptables)\n\n"
+        "IMPORTANT: When proposing a command, put it on a separate line starting with 'COMMAND:'\n"
+        "For example:\n"
+        "COMMAND: sudo apt update\n\n"
+        "NOTE: Avoid interactive commands like 'less' as this script is fully automated.\n"
+        "NOTE: Only propose destructive commands if absolutely necessary.\n"
     )
-    # Append extra system lines
     for line in extra_system:
         system_message_content += f"- {line}\n"
 
@@ -390,10 +414,10 @@ def build_chat_messages(system_info, extra_system, extra_user):
 
     user_message_content = (
         f"Here is the current system state:\n\n{system_info}\n\n"
-        "Please propose needed commands or actions. If nothing is needed, say so.\n"
-        "This script automatically runs any commands you propose, so be careful.\n"
+        "Please propose any needed commands or actions. If nothing is needed, simply say so.\n"
+        "This script will automatically execute any commands you propose, so please be cautious.\n"
+        "NOTE: Do not propose destructive commands unless absolutely necessary.\n"
     )
-    # Append extra user lines
     for line in extra_user:
         user_message_content += f"- {line}\n"
 
@@ -407,43 +431,40 @@ def build_chat_messages(system_info, extra_system, extra_user):
 # ------------------------------------------------------------------------------
 def call_llm_chat(messages):
     """
-    Call GPT-4o using client.chat.completions.create(). Return the assistant's reply text.
+    Send the constructed messages to the LLM and retrieve its response.
     """
     log("Sending messages to the LLM...")
 
-    # Log each message for debugging
+    # Log each message for debugging purposes (avoid logging sensitive info in production)
     for i, msg in enumerate(messages):
         log(f"Message {i} ({msg['role']}):\n{msg['content']}\n---END---")
 
     try:
         response = client.chat.completions.create(
-            model=MODEL_NAME,
+            model="o1",
             messages=messages,
             response_format={"type": "text"},
-            temperature=0.0,
-            max_completion_tokens=1000,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0
+            reasoning_effort="high"
         )
-        log(f"Raw response from {MODEL_NAME}:\n{response}")
 
+        log(f"Raw response from o1:\n{response}")
         choices = response.choices
         if not choices:
             log("No choices returned from the LLM.")
             return ""
         text_response = choices[0].message.content
         return text_response.strip()
+
     except Exception as e:
-        error_msg = f"Error calling {MODEL_NAME}: {e}"
+        error_msg = f"Error calling o1: {e}"
         log(error_msg)
         return ""
 
 # ------------------------------------------------------------------------------
 def extract_commands(llm_response):
     """
-    Parse the LLM response for lines that start with 'COMMAND:'.
-    We'll return a list of the commands minus the prefix.
+    Parse the LLM response for lines starting with 'COMMAND:'.
+    Returns a list of command strings without the prefix.
     """
     commands = []
     for line in llm_response.splitlines():
@@ -456,20 +477,19 @@ def extract_commands(llm_response):
 # ------------------------------------------------------------------------------
 def run_commands(commands):
     """
-    Executes *all* proposed commands, with no whitelist check.
-    This is extremely risky in practice, but useful for comparison testing.
+    Execute all proposed commands.
+    WARNING: This function runs commands without any whitelist checks.
     """
     executed = []
     for cmd in commands:
         lower_cmd = cmd.lower()
 
-        # If the LLM forgot "-y" on apt upgrade, let's force it
+        # Append '-y' for apt upgrade if missing
         if lower_cmd.startswith("sudo apt upgrade") and "-y" not in lower_cmd:
             log(f"Appending '-y' to upgrade command: {cmd}")
             cmd += " -y"
 
-        # If the LLM tries "sudo less /var/log/rkhunter.log", override it
-        # so we don't get stuck in an interactive pager
+        # Replace 'less' with 'cat' to avoid interactive paging
         if lower_cmd.startswith("sudo less /var/log/rkhunter.log"):
             log(f"Overriding 'less' with 'cat' to avoid blocking. (original: {cmd})")
             cmd = "sudo cat /var/log/rkhunter.log"
@@ -486,41 +506,40 @@ def run_commands(commands):
 
 # ------------------------------------------------------------------------------
 def main():
-    log("Starting GPT-4o admin PoC WITHOUT a whitelist (full LLM control).")
+    log("Starting LLM o1 admin PoC WITHOUT a whitelist (full LLM control).")
 
-    # 1. Load extra instructions from JSON (if it exists)
+    # 1. Load extra instructions from the external JSON file.
     extra_system, extra_user = load_prompt_addons("prompt_suggestions.json")
 
-    # 2. Gather system info (with a progress bar)
+    # 2. Gather system information (with progress bar).
     system_info = get_system_info()
 
-    # 3. Build the chat prompt, merging the extra lines
+    # 3. Build the chat prompt messages.
     messages = build_chat_messages(system_info, extra_system, extra_user)
 
-    # 4. Call the LLM
+    # 4. Call the LLM.
     llm_response = call_llm_chat(messages)
 
-    # 5. Log the LLM's entire output
+    # 5. Log the full LLM response.
     log("LLM Response:")
     log(llm_response)
 
-    # 6. Extract any commands from lines starting with "COMMAND:"
+    # 6. Extract any commands proposed by the LLM.
     proposed_commands = extract_commands(llm_response)
     if not proposed_commands:
         log("No commands proposed by the LLM.")
     else:
         log(f"Proposed commands from LLM: {proposed_commands}")
 
-    # 7. Execute commands automatically, no whitelist
+    # 7. Execute the proposed commands automatically (no whitelist).
     executed_cmds = run_commands(proposed_commands)
 
-    # 8. Summarize
     if executed_cmds:
         log(f"Executed {len(executed_cmds)} commands from LLM suggestions.")
     else:
         log("No commands executed.")
 
-    log("GPT-4o admin PoC (no whitelist) run completed.\n")
+    log("LLM o1 admin PoC (no whitelist) run completed.\n")
 
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
